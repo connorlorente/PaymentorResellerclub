@@ -93,8 +93,11 @@ class FakeRegistrarClient implements RegistrarClient
     {
         $this->calls[] = __FUNCTION__;
 
-        return new OrderDetails($orderId, $this->expiry);
+        return new OrderDetails($orderId, $this->expiry, [], $this->orderStatus, $this->fundsShort);
     }
+
+    public string $orderStatus = '';
+    public bool $fundsShort = false;
 
     public function renew(int $orderId, int $years, int $registrarExpiryEpoch, bool $autoRenew): OperationResult
     {
@@ -143,6 +146,14 @@ class FakeRegistrarClient implements RegistrarClient
     {
         $this->calls[] = __FUNCTION__;
         $this->locked = $locked;
+    }
+
+    public ?bool $privacyProtected = true;
+
+    public function setPrivacy(int $orderId, bool $protect): void
+    {
+        $this->calls[] = __FUNCTION__;
+        $this->privacyProtected = $protect;
     }
 
     public function deleteOrder(int $orderId): OperationResult

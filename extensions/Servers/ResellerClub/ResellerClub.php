@@ -12,8 +12,10 @@ use Illuminate\Console\Application as ConsoleApplication;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Event;
 use Illuminate\Support\Facades\Gate;
-use Illuminate\Support\Facades\Mail;
 use Paymenter\Extensions\Servers\ResellerClub\Core\CancellationService;
+use Paymenter\Extensions\Servers\ResellerClub\Core\EmailTemplates;
+use Paymenter\Extensions\Servers\ResellerClub\Core\RegistrationWatcher;
+use Paymenter\Extensions\Servers\ResellerClub\Core\TldRules;
 use Illuminate\Support\Facades\Schedule;
 use Illuminate\Support\Facades\View;
 use Livewire\Livewire;
@@ -43,7 +45,7 @@ use Paymenter\Extensions\Servers\ResellerClub\Registrar\RegistrarException;
 #[ExtensionMeta(
     name: 'ResellerClub Domains',
     description: 'Sell and manage ResellerClub domains',
-    version: '0.3.4',
+    version: '0.4.0',
     author: 'Virtual Developments',
 )]
 class ResellerClub extends Server
@@ -196,9 +198,25 @@ class ResellerClub extends Server
             // Paymenter sets the service active right after queueing this job, so put it back to pending.
             $this->markPending($service);
 
-            $this->alertAdmin("Domain registration failed (service {$service->id})", "A domain order could not be registered: service {$service->id}.\n{$r['error']}\nFix the cause (e.g. top up the ResellerClub balance), then use Retry in Admin > Domain operations.");
+            $this->alertAdmin("Domain registration failed (service {$service->id})", "A domain order could not be registered: service {$service->id}.\n{$r['error']}\nFix the cause, then use Retry in Admin > Domain operations.");
 
             throw new \RuntimeException('Domain registration failed: ' . $r['error']); // op visible to admins
+        }
+
+        // Submitted. Is it live yet? The registrar accepts an order it cannot pay for (account kept unfunded on purpose)
+        // and holds it: then the service must not look active, and the customer must not be told it is.
+        $watcher = new RegistrationWatcher(
+            $this->client(), new EloquentOperationStore(),
+            fn (array $row) => $this->registrationHeld($service, $row, true),
+            fn (array $row, int $expires) => $this->registrationActive($service, $expires, false),
+        );
+        $state = $watcher->check(RegistrationService::key($service->id));
+        if ($state === 'awaiting_funds') {
+            // No "Service activated" email now; registrationActive() sends it when the registrar activates the order.
+            throw new \RuntimeException('Domain order is held at ResellerClub until the reseller balance covers it. It completes by itself; see Admin > Domain operations.');
+        }
+        if ($state !== 'completed') {
+            $this->markPending($service); // still processing: the five-minute watcher activates it
         }
 
         return true;
@@ -207,6 +225,56 @@ class ResellerClub extends Server
     private function markPending(Service $service): void
     {
         $service->forceFill(['status' => Service::STATUS_PENDING])->save();
+    }
+
+    /** The registrar is holding the order because the reseller balance cannot pay for it. */
+    public function registrationHeld(Service $service, array $op, bool $activationEmailSuppressed = false): void
+    {
+        try {
+            $this->markPending($service);
+            if ($activationEmailSuppressed) {
+                (new EloquentOperationStore())->update($op['idempotency_key'], ['payload' => array_merge((array) ($op['payload'] ?? []), ['notify_on_active' => true])]);
+            }
+            $domain = (string) ($op['payload']['domain'] ?? '');
+            $this->alertAdmin(
+                "Domain order waiting for funds (service {$service->id})",
+                "A customer has paid for {$domain} (service {$service->id}), but ResellerClub is holding the order because the reseller balance is too low.\n\n"
+                . "Top up the balance and the order completes by itself (the service then turns active and the customer is told). "
+                . "To refuse it instead (mistyped name, spam), cancel the service: the held order is deleted at ResellerClub. Refund the customer yourself.\n"
+                . 'See Admin > Domain operations.',
+            );
+        } catch (\Throwable $e) {
+            \Paymenter\Extensions\Servers\ResellerClub\Core\SafeReport::report($e);
+        }
+    }
+
+    /** The registrar order is live: make the service active and (if the activation email was held back) send it now. */
+    public function registrationActive(Service $service, int $expiresAt, bool $unused = false): void
+    {
+        try {
+            $service->forceFill(['status' => Service::STATUS_ACTIVE])->save();
+            if ($expiresAt > 0) {
+                $service->properties()->updateOrCreate(['key' => 'rc_expiry'], ['name' => 'rc_expiry', 'value' => (string) $expiresAt]);
+            }
+            $op = (new EloquentOperationStore())->find(RegistrationService::key($service->id));
+            if ($op && !empty($op['payload']['notify_on_active'])) {
+                (new EloquentOperationStore())->update($op['idempotency_key'], ['payload' => array_merge((array) $op['payload'], ['notify_on_active' => false])]);
+                \App\Helpers\NotificationHelper::serverCreatedNotification($service->user, $service);
+            }
+        } catch (\Throwable $e) {
+            \Paymenter\Extensions\Servers\ResellerClub\Core\SafeReport::report($e);
+        }
+    }
+
+    /** The registrar never completed the order within the polling window. */
+    public function registrationFailed(Service $service, string $error): void
+    {
+        try {
+            $this->markPending($service);
+            $this->alertAdmin("Domain registration did not complete (service {$service->id})", "A paid domain order did not complete at ResellerClub: service {$service->id}.\n{$error}\nSee Admin > Domain operations.");
+        } catch (\Throwable $e) {
+            \Paymenter\Extensions\Servers\ResellerClub\Core\SafeReport::report($e);
+        }
     }
 
     /** Shared by createServer and the admin retry job. Records the outcome on the operation and stores the registrar IDs. */
@@ -243,7 +311,7 @@ class ResellerClub extends Server
         $years = $plan && $plan->billing_unit === 'year' ? (int) $plan->billing_period : (int) ($settings['years'] ?? 1);
 
         $r = $svc->register($service->id, (string) $p('domain_name'), max(1, $years), array_values($ns), $contact, $contact,
-            ['privacy' => (bool) ($settings['privacy'] ?? false), 'attributes' => $this->parseAttributes($settings['attributes'] ?? ''),
+            ['privacy' => $this->wantsPrivacy((string) $p('domain_name'), $settings, (array) $properties), 'attributes' => $this->parseAttributes($settings['attributes'] ?? ''),
                 'transfer' => $isTransfer, 'auth_code' => (string) $p('auth_code')], $existing);
 
         if ($r['status'] !== 'failed') {
@@ -260,6 +328,18 @@ class ResellerClub extends Server
         return $r;
     }
 
+    /**
+     * WHOIS privacy is bought at registration when the customer ticked the "privacy" config option on the product
+     * (the product setting "Buy privacy protection by default" turns it on for everyone), and only where the
+     * registry offers it: asking for it on a .uk would fail the whole registration.
+     */
+    private function wantsPrivacy(string $domain, array $settings, array $properties): bool
+    {
+        $asked = TldRules::truthy($settings['privacy'] ?? false) || TldRules::truthy($properties['privacy'] ?? false);
+
+        return $asked && TldRules::supportsPrivacy($domain);
+    }
+
     // The registrar is never touched on suspend/terminate: the cron job must not delete a domain.
     public function suspendServer(Service $service, $settings, $properties)
     {
@@ -272,14 +352,16 @@ class ResellerClub extends Server
     }
 
     /**
-     * A cancelled domain tells the registrar (deleted when still inside the grace period, otherwise left to expire).
+     * A domain that someone CANCELLED (a customer or an admin, now or at the end of the term) tells the registrar:
+     * deleted when still inside the grace period (or still held), otherwise left to expire. A service that is merely
+     * unpaid and gets terminated by the overdue rule never touches the registrar.
      * This also runs inside the nightly cron's transaction, so nothing here may throw.
      */
     public function terminateServer(Service $service, $settings, $properties)
     {
         try {
             $orderId = (int) (((array) $properties)['rc_order_id'] ?? 0);
-            if ($orderId) {
+            if ($orderId && $service->cancellation()->exists()) {
                 $outcome = (new CancellationService($this->client(), new EloquentOperationStore()))->cancel($service->id, $orderId);
                 if ($outcome === 'failed') {
                     $this->alertAdmin("Domain cancellation needs attention (service {$service->id})", "The registrar could not be told about the cancellation of service {$service->id}. See Admin > Domain operations.");
@@ -296,10 +378,7 @@ class ResellerClub extends Server
     private function alertAdmin(string $subject, string $body): void
     {
         try {
-            $to = config('settings.system_email_address');
-            if ($to) {
-                Mail::raw($body, fn ($m) => $m->to($to)->subject($subject));
-            }
+            \App\Helpers\NotificationHelper::sendSystemEmailNotification($subject, $body); // honours the mail-disable setting
         } catch (\Throwable $e) {
             \Paymenter\Extensions\Servers\ResellerClub\Core\SafeReport::report($e);
         }
@@ -318,8 +397,14 @@ class ResellerClub extends Server
 
         return [
             ['type' => 'view', 'name' => 'nameservers', 'label' => 'Nameservers', 'function' => 'getNameserversView'],
+            ['type' => 'view', 'name' => 'privacy', 'label' => 'WHOIS privacy', 'function' => 'getPrivacyView'],
             ['type' => 'view', 'name' => 'transfer', 'label' => 'Transfer away', 'function' => 'getTransferView'],
         ];
+    }
+
+    public function getPrivacyView(Service $service, $settings, $properties, $view)
+    {
+        return view('resellerclub::privacy-wrapper', ['serviceId' => $service->id]);
     }
 
     public function getTransferView(Service $service, $settings, $properties, $view)
@@ -348,12 +433,15 @@ class ResellerClub extends Server
         Livewire::component('resellerclub.nameservers', Nameservers::class);
         Livewire::component('resellerclub.search', Search::class);
         Livewire::component('resellerclub.transfer', \Paymenter\Extensions\Servers\ResellerClub\Livewire\Transfer::class);
+        Livewire::component('resellerclub.privacy', \Paymenter\Extensions\Servers\ResellerClub\Livewire\Privacy::class);
         Event::listen(Updated::class, RenewOnServiceUpdated::class);
         Event::listen('pages.home', \Paymenter\Extensions\Servers\ResellerClub\Listeners\HomeDomainSearch::class);
         // Hosting ordered with "register/transfer a domain": put the matching domain product in the cart too.
         Event::listen(CartItemCreated::class, AddDomainToCart::class);
         // An edited cart item has its config options rebuilt by Paymenter: keep the "Domain" line on it.
         Event::listen(\App\Events\CartItem\Updated::class, [AddDomainToCart::class, 'handleUpdated']);
+        // Removing one half of a hosting + domain pair takes care of the other half.
+        Event::listen(\App\Events\CartItem\Deleted::class, [AddDomainToCart::class, 'handleDeleted']);
         Gate::policy(Operation::class, OperationPolicy::class);
         Event::listen('permissions', fn () => [
             'admin.resellerclub.operations.view' => 'View ResellerClub domain operations',
@@ -405,6 +493,7 @@ class ResellerClub extends Server
     public function installed(): void
     {
         ExtensionHelper::runMigrations(self::PATH . '/database/migrations');
+        EmailTemplates::apply(); // the order email lists the domain; kept in code so every install gets it
     }
 
     public function upgraded($oldVersion = null): void

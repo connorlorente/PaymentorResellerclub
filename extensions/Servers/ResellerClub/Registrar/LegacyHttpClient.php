@@ -194,7 +194,53 @@ class LegacyHttpClient implements RegistrarClient
             }
         }
 
-        return new OrderDetails($orderId, (int) ($res['endtime'] ?? 0), $ns);
+        return new OrderDetails(
+            $orderId,
+            (int) ($res['endtime'] ?? 0),
+            $ns,
+            strtolower(trim((string) ($res['currentstatus'] ?? ''))),
+            self::mentions($res, 'insufficient funds'),
+            self::boolOrNull($res['privacyprotectedallowed'] ?? null),
+            self::boolOrNull($res['privacyprotected'] ?? $res['isprivacyprotected'] ?? null),
+        );
+    }
+
+    private static function boolOrNull(mixed $v): ?bool
+    {
+        if (is_bool($v)) {
+            return $v;
+        }
+        if (is_string($v) && in_array(strtolower($v), ['true', 'false'], true)) {
+            return strtolower($v) === 'true';
+        }
+
+        return null;
+    }
+
+    /** True when any text anywhere in the response contains $needle. The funds reason has no documented field. */
+    private static function mentions(mixed $data, string $needle): bool
+    {
+        if (is_array($data)) {
+            foreach ($data as $v) {
+                if (self::mentions($v, $needle)) {
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
+        return is_string($data) && stripos($data, $needle) !== false;
+    }
+
+    public function setPrivacy(int $orderId, bool $protect): void
+    {
+        // UNCONFIRMED: domains/modify-privacy-protection.json. Only for domains that already have privacy purchased.
+        $this->call('POST', 'domains/modify-privacy-protection.json', [
+            'order-id' => $orderId,
+            'protect-privacy' => $protect ? 'true' : 'false',
+            'reason' => 'Changed by the customer in the client area',
+        ]);
     }
 
     public function renew(int $orderId, int $years, int $registrarExpiryEpoch, bool $autoRenew): OperationResult

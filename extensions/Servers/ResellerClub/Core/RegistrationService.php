@@ -31,7 +31,7 @@ class RegistrationService
         $isTransfer = (bool) ($options['transfer'] ?? false);
         [$op] = $this->store->firstOrCreate($serviceId, $isTransfer ? 'transfer' : 'register', $key, ['domain' => $domain, 'years' => $years]);
 
-        if (in_array($op['status'], ['submitted', 'completed'], true)) {
+        if (in_array($op['status'], ['submitted', 'awaiting_funds', 'completed'], true)) {
             return ['status' => $op['status'], 'order_id' => $op['rc_order_id'] ?? null, 'error' => null];
         }
 
@@ -45,9 +45,10 @@ class RegistrationService
         try {
             // A timed-out earlier attempt may have registered the domain: look first.
             if ($attempts > 0 && ($orderId = $this->client->orderIdForDomain($domain))) {
-                $this->store->update($key, ['status' => 'completed', 'rc_order_id' => $orderId]);
+                // Found, not yet known to be live (it may be held for funds): let the watcher decide.
+                $this->store->update($key, ['status' => 'submitted', 'rc_order_id' => $orderId]);
 
-                return ['status' => 'completed', 'order_id' => $orderId, 'error' => null];
+                return ['status' => 'submitted', 'order_id' => $orderId, 'error' => null];
             }
 
             $customerId = $existingCustomerId ?: $this->client->ensureCustomer($user);

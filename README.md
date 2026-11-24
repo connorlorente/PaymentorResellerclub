@@ -21,13 +21,16 @@ Built and tested against Paymenter running Laravel 13, Filament 5 and Livewire 4
 - `/domains`: availability search. Available names get a Buy button; taken names get a Transfer button.
 - Hosting checkout: choose *Register a new domain*, *Transfer my domain to you* (with the transfer code) or *I'll use a domain I already own*. A registered or transferred domain is added to the cart as a separate domain service. Availability is checked again before the order is accepted.
 - Registrant details come from the customer's Paymenter account (WHMCS style), so checkout only asks for the domain.
-- Client area, per domain: **Nameservers** (edit, or reset to the defaults) and **Transfer away** (transfer lock on/off and the transfer/auth code, shown on request, never stored or logged).
-- Cancelling a domain tells ResellerClub: the registration is deleted when it is still inside the registry's grace period, otherwise it is left to expire (it is never auto-renewed at the registrar).
+- Client area, per domain: **Nameservers** (edit, or reset to the defaults), **WHOIS privacy** (on/off, for domains bought with privacy) and **Transfer away** (transfer lock on/off and the transfer/auth code, shown on request, never stored or logged).
+- WHOIS privacy is bought at checkout with a normal Paymenter config option (see *WHOIS privacy* below), and only for extensions where ResellerClub offers it.
+- The cart keeps a hosting item and its domain item in step: editing the hosting item's domain replaces or removes the domain item, removing the hosting item removes its domain, and removing just the domain turns the hosting back to "use my own domain".
+- **Cancelling a domain** (a customer, or an admin, now or at the end of the term) tells ResellerClub: the registration is deleted when it is still inside the registry's grace period or still held, otherwise it is left to expire (it is never auto-renewed at the registrar). A domain that is merely *unpaid* and gets terminated by Paymenter's overdue rule never touches the registrar; only a real cancellation does.
 
 **For admins** (Admin > Domain setup / Domain operations)
 - One click creates a product per extension (with a price for every registration term) and syncs prices from your ResellerClub cost prices plus a markup (percentage or fixed, optional per-product override and exchange rate). Prices can be applied automatically each night or reviewed first.
 - Every registrar action (register, transfer, renew, nameservers, cancel) is an *operation* with status, attempts, the registrar's order and the error text. Failed registrations and renewals can be retried from the list.
-- An email goes to the system email address when a paid domain order fails to register (for example the reseller balance is too low), so nothing sits unnoticed.
+- An email goes to the system email address when a paid domain order fails, does not complete, or is held for funds, so nothing sits unnoticed.
+- The order email lists the domain next to each item. The change to Paymenter's stock "New order created" template lives in code (`Core/EmailTemplates.php`) and is applied on install and upgrade; a template you have changed in some other way is left alone.
 - Permissions are separate (`admin.resellerclub.operations.view`, `.retry`, `.manage`).
 
 ## How it is built to be safe on a live billing site
@@ -38,6 +41,25 @@ Built and tested against Paymenter running Laravel 13, Filament 5 and Livewire 4
 - UK names (`.uk`, `.co.uk`, `.org.uk`, `.me.uk`) get the contact type ResellerClub requires.
 - Availability lookups give up after 10 seconds so checkout never hangs; the customer sees "could not check right now".
 - Each service's domain page checks ownership and status on the server for every action; order ids and customer ids never come from the browser.
+
+## Orders held for funds (running the reseller account unfunded)
+
+ResellerClub accepts an order it cannot pay for: the order exists but stays inactive ("locked in processing") and the reason is only in the order details. This extension treats that as a normal waiting state, so you can keep the reseller balance empty on purpose and only fund an order you actually want (a mistyped name or a spam order then never costs money):
+
+1. The customer pays Paymenter as usual. The registration is submitted and the extension looks at the order straight away.
+2. Held for funds: the service stays **pending** (not active), no "Service activated" email is sent yet, the operation shows **Waiting for funds**, and the system email address gets one message with what to do. (The held order's CreateJob appears once under Failed Jobs; mark it resolved.)
+3. Top up the balance and ResellerClub completes the order by itself. Within five minutes the operation turns **Completed**, the service turns **active** and the customer gets their "Service activated" email.
+4. To refuse it instead, cancel the service: the held order is deleted at ResellerClub. Refund the customer yourself.
+
+If an order is neither live nor held and the registrar's action never completes within about two hours, the operation fails and you are emailed.
+
+## WHOIS privacy
+
+Privacy is a normal Paymenter *config option* so it is priced like any other add-on:
+
+- **Admin > Configuration > Config Options**: create a *checkbox* option with the environment variable **`privacy`** and a price per year, and attach it to the domain products that support privacy (`.com .net .org .info .biz`). Do not attach it to `.uk` / `.co.uk` / `.eu` / `.us` and similar: ResellerClub does not offer it there, and the extension never requests it for them.
+- A customer who ticks it gets privacy bought with the registration. In the client area they can then switch it on or off.
+- The product setting *Buy privacy protection by default* turns it on for every registration of that product.
 
 ## Requirements
 
@@ -56,7 +78,7 @@ python build.py
 This writes `dist/ResellerClub.zip`, `dist/PleskDomains.zip` and `dist/InvoiceDomains.zip`. Upload each in **Admin > Extensions > Available Extensions > Upload Extension**, then:
 
 1. **Admin > Extensions > Servers**: add a server using *ResellerClub* and fill in the settings below. Use **Test connection** on the Domain setup page.
-2. Create a category for domains (for example "Domains"), then **Admin > Domain setup > Create TLD products**. Standard extensions are pre-filled; products start **hidden**.
+2. Create a category for domains (for example "Domains"; `assets/domains-category.png` is a square icon for it), then **Admin > Domain setup > Create TLD products**. Standard extensions are pre-filled; products start **hidden**.
 3. Check the prices, then untick *Hide product* on the extensions you want to sell.
 4. To offer the domain step with hosting, add a server using *Plesk + Domains* (leave its connection fields blank to reuse your existing Plesk server) and switch your hosting products to it on the product's *Server* tab, re-entering each product's Plesk plan name (changing the server clears it).
 
@@ -87,17 +109,18 @@ Per-product settings: TLD, years, privacy default, TLD attributes (`name=value` 
 
 ## Known limits
 
-- Some ResellerClub endpoints could not be confirmed against a real order and are marked `UNCONFIRMED` in `LegacyHttpClient.php`: the order-details field names (`endtime`, `nsN`, `domsecret`, lock status), `domains/delete.json`, and the theft-protection (lock) endpoints. Check them on the first real order.
+- Some ResellerClub endpoints could not be confirmed against a real order and are marked `UNCONFIRMED` in `LegacyHttpClient.php`: the order-details field names (`endtime`, `nsN`, `currentstatus`, `domsecret`, lock and privacy fields), `domains/delete.json`, `domains/modify-privacy-protection.json` and the theft-protection (lock) endpoints. Check them on the first real order. The "held for funds" detection looks for the text "insufficient funds" anywhere in the order details, because the field that carries it is not documented.
 - Premium domains are not sold. DNS record editing is not included (DNS is expected to live on your hosting/DNS nameservers).
 - Only the UK extensions use a special contact type; other country-specific registry rules go through the *TLD attributes* setting.
-- Editing a hosting item in the cart does not re-sync its paired domain item.
+- Editing a *domain* item on its own in the cart drops its link to the hosting item (it then behaves as a separate item).
+- WHOIS privacy can only be switched for domains bought with privacy; buying it later for an existing domain is not offered.
 
 ## Troubleshooting
 
 - **"Blocked by ResellerClub's Cloudflare firewall"**: the API's Cloudflare refused this server's IP before the API saw the request. The message includes the IP and Ray ID; send both to ResellerClub support. The API key whitelist alone does not help.
 - **"server IP is probably not whitelisted"**: add the IP under Settings > API in ResellerClub.
 - **Extension upload shows "Failed to upload extension" with a log "Permission denied" message**: the web user cannot write the daily Laravel log file (often because a root cron job created it). The upload itself succeeds. Fix it by logging to stderr (`LOG_CHANNEL=stderr`) or fixing the log folder ownership.
-- **A registration is "failed" with a funds error**: top up the reseller balance and press Retry on the operation.
+- **A paid order is "Waiting for funds"**: see *Orders held for funds* above. A registration that is "failed" for another reason can be retried from Admin > Domain operations.
 
 ## Development
 

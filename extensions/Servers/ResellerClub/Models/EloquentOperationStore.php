@@ -29,6 +29,10 @@ class EloquentOperationStore implements OperationStore
         if (isset($changes['last_error'])) {
             $changes['last_error'] = Redactor::text($changes['last_error']);
         }
+        if (isset($changes['payload']) && is_array($changes['payload'])) {
+            // A bulk update bypasses the model's array cast.
+            $changes['payload'] = json_encode(Redactor::payload($changes['payload']));
+        }
         Operation::where('idempotency_key', $key)->update($changes);
     }
 

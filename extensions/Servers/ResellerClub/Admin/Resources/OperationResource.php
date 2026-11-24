@@ -47,6 +47,7 @@ class OperationResource extends Resource
                     'completed' => 'success',
                     'failed' => 'danger',
                     'submitted' => 'info',
+                    'awaiting_funds' => 'warning',
                     default => 'gray',
                 }),
                 TextColumn::make('rc_order_id')->label('Order ID')->searchable(),
@@ -59,7 +60,7 @@ class OperationResource extends Resource
                 TextColumn::make('updated_at')->dateTime()->sortable(),
             ])
             ->filters([
-                SelectFilter::make('status')->options(array_combine(['queued', 'submitted', 'completed', 'failed'], ['Queued', 'Submitted', 'Completed', 'Failed'])),
+                SelectFilter::make('status')->options(array_combine(['queued', 'submitted', 'awaiting_funds', 'completed', 'failed'], ['Queued', 'Submitted', 'Waiting for funds', 'Completed', 'Failed'])),
                 SelectFilter::make('type')->options(['register' => 'Register', 'transfer' => 'Transfer', 'renew' => 'Renew', 'nameservers' => 'Nameservers', 'cancel' => 'Cancel']),
             ])
             ->recordActions([

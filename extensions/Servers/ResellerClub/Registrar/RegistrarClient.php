@@ -36,6 +36,9 @@ interface RegistrarClient
 
     public function setTransferLock(int $orderId, bool $locked): void;
 
+    /** Turn WHOIS privacy protection on or off for a domain that already has privacy purchased. */
+    public function setPrivacy(int $orderId, bool $protect): void;
+
     /** Ask the registrar to delete the registration. Only accepted inside the registry's grace period. */
     public function deleteOrder(int $orderId): OperationResult;
 

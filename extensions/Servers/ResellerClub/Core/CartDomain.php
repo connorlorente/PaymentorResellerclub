@@ -52,11 +52,14 @@ class CartDomain
      *
      * @return array<string,string>
      */
-    public static function domainCheckout(string $action, string $domain, ?string $authCode = null): array
+    public static function domainCheckout(string $action, string $domain, ?string $authCode = null, ?string $bundledBy = null): array
     {
         $fields = ['domain_action' => $action, 'domain_name' => $domain];
         if ($action === 'transfer') {
             $fields['auth_code'] = (string) $authCode;
+        }
+        if ($bundledBy !== null) {
+            $fields['bundled_by'] = $bundledBy; // which hosting cart item added this one (a string: never null)
         }
 
         return $fields;

@@ -83,12 +83,18 @@ class Search extends Component
                 continue; // not sold in v1
             }
             $domain = "$label.$tld";
+            $action = match (true) {
+                $s === 'available' => 'register',
+                $s === 'taken' && $ext->transfersAllowed() => 'transfer',
+                default => null,
+            };
             $this->results[] = [
                 'domain' => $domain,
                 'status' => $s,
-                'price' => $s === 'available' ? (string) $product->price() : null,
-                'url' => $s === 'available'
-                    ? route('products.checkout', ['category' => $product->category, 'product' => $product, 'config' => ['domain_name' => $domain]])
+                'action' => $action,
+                'price' => $action ? (string) $product->price() : null,
+                'url' => $action
+                    ? route('products.checkout', ['category' => $product->category, 'product' => $product, 'config' => ['domain_action' => $action, 'domain_name' => $domain]])
                     : null,
                 'wanted' => $tld === $wanted,
             ];

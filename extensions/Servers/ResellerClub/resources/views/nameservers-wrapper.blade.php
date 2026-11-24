@@ -1,1 +1,1 @@
-<livewire:resellerclub.nameservers :service-id="$serviceId" :current="$current" />
+<livewire:resellerclub.nameservers :service-id="$serviceId" :current="$current" :defaults="$defaults" />

@@ -47,9 +47,13 @@ class FakeRegistrarClient implements RegistrarClient
         return 11;
     }
 
-    public function createContact(array $registrant, int $customerId): int
+    /** @var string|null contact type passed to the last createContact */
+    public ?string $lastContactType = null;
+
+    public function createContact(array $registrant, int $customerId, string $type = 'Contact'): int
     {
         $this->calls[] = __FUNCTION__;
+        $this->lastContactType = $type;
 
         return 22;
     }
@@ -62,6 +66,20 @@ class FakeRegistrarClient implements RegistrarClient
         }
 
         return new OperationResult(555, 900);
+    }
+
+    /** @var string|null auth code passed to the last transfer */
+    public ?string $lastAuthCode = null;
+
+    public function transfer(RegisterRequest $r, string $authCode): OperationResult
+    {
+        $this->calls[] = __FUNCTION__;
+        $this->lastAuthCode = $authCode;
+        if ($this->registerError) {
+            throw $this->registerError;
+        }
+
+        return new OperationResult(556, 901);
     }
 
     public function orderIdForDomain(string $domain): ?int
@@ -101,6 +119,40 @@ class FakeRegistrarClient implements RegistrarClient
         $this->calls[] = __FUNCTION__;
 
         return new ActionStatus($eaqId, $this->actionStatus);
+    }
+
+    public string $authCode = 'EPP-CODE-123';
+    public ?bool $locked = true;
+    public ?RegistrarException $deleteError = null;
+
+    public function authCode(int $orderId): string
+    {
+        $this->calls[] = __FUNCTION__;
+
+        return $this->authCode;
+    }
+
+    public function transferLock(int $orderId): ?bool
+    {
+        $this->calls[] = __FUNCTION__;
+
+        return $this->locked;
+    }
+
+    public function setTransferLock(int $orderId, bool $locked): void
+    {
+        $this->calls[] = __FUNCTION__;
+        $this->locked = $locked;
+    }
+
+    public function deleteOrder(int $orderId): OperationResult
+    {
+        $this->calls[] = __FUNCTION__;
+        if ($this->deleteError) {
+            throw $this->deleteError;
+        }
+
+        return new OperationResult($orderId, 903);
     }
 
     /** @var OrderSummary[] */

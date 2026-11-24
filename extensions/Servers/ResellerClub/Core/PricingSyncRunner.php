@@ -45,7 +45,7 @@ class PricingSyncRunner
                 Cache::put($key, $costs, now()->addDays(3));
             }
         } catch (\Throwable $e) {
-            report($e);
+            \Paymenter\Extensions\Servers\ResellerClub\Core\SafeReport::report($e);
         }
 
         return Cache::get($key, []);

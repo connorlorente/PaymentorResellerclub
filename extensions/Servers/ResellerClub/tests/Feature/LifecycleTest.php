@@ -193,4 +193,65 @@ class LifecycleTest extends TestCase
         $this->assertSame(777, $r['order_id']);
         $this->assertSame(1, $this->client->count('register'));
     }
+
+    public function test_registration_works_when_a_new_row_lacks_the_database_default_columns(): void
+    {
+        // The real database store returned a just-created row without attempts/rc_order_id/... (their defaults live in
+        // the database), which crashed the first registration in production: "Undefined array key attempts".
+        $this->store = new class extends InMemoryOperationStore {
+            public function firstOrCreate(int $serviceId, string $type, string $key, array $payload = []): array
+            {
+                [$row, $created] = parent::firstOrCreate($serviceId, $type, $key, $payload);
+                if ($created) {
+                    $row = array_diff_key($row, array_flip(['attempts', 'rc_order_id', 'rc_action_id', 'last_error']));
+                }
+
+                return [$row, $created];
+            }
+        };
+        $r = $this->register();
+        $this->assertSame('submitted', $r['status']);
+        $this->assertSame(555, $r['order_id']);
+        $this->assertSame(1, $this->store->find(RegistrationService::key(1))['attempts']);
+    }
+
+    private function transfer(bool $allow = true, string $code = 'EPP-123'): array
+    {
+        return (new RegistrationService($this->client, $this->store, $allow))
+            ->register(2, 'mine.co.uk', 1, [], ['email' => 'a@b.c'], ['name' => 'A'], ['transfer' => true, 'auth_code' => $code]);
+    }
+
+    public function test_transfer_calls_transfer_not_register_and_records_a_transfer_operation(): void
+    {
+        $r = $this->transfer();
+        $this->assertSame('submitted', $r['status']);
+        $this->assertSame(556, $r['order_id']);
+        $this->assertSame(1, $this->client->count('transfer'));
+        $this->assertSame(0, $this->client->count('register'));
+        $this->assertSame('EPP-123', $this->client->lastAuthCode);
+        $this->assertSame('transfer', $this->store->find(RegistrationService::key(2))['type']);
+    }
+
+    public function test_repeat_transfer_makes_no_second_call(): void
+    {
+        $this->transfer();
+        $this->transfer();
+        $this->assertSame(1, $this->client->count('transfer'));
+    }
+
+    public function test_transfer_respects_registrations_switch(): void
+    {
+        $r = $this->transfer(false);
+        $this->assertSame('failed', $r['status']);
+        $this->assertSame(0, $this->client->count('transfer'));
+    }
+
+    public function test_rejected_transfer_is_failed_and_retryable(): void
+    {
+        $this->client->registerError = new RegistrarException('Invalid auth code', RegistrarException::API);
+        $r = $this->transfer();
+        $this->assertSame('failed', $r['status']);
+        $op = $this->store->find(RegistrationService::key(2));
+        $this->assertTrue((new \Paymenter\Extensions\Servers\ResellerClub\Core\OperationRetry($this->store))->canRetry($op));
+    }
 }

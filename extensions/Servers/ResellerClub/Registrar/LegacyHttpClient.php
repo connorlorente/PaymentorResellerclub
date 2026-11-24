@@ -84,7 +84,7 @@ class LegacyHttpClient implements RegistrarClient
         return (int) (is_array($res) ? ($res['customerid'] ?? 0) : $res);
     }
 
-    public function createContact(array $registrant, int $customerId): int
+    public function createContact(array $registrant, int $customerId, string $type = 'Contact'): int
     {
         // UNCONFIRMED: only `name` is known to be required.
         $res = $this->call('POST', 'contacts/add.json', [
@@ -99,13 +99,30 @@ class LegacyHttpClient implements RegistrarClient
             'phone-cc' => $registrant['phone_cc'],
             'phone' => $registrant['phone'],
             'customer-id' => $customerId,
-            'type' => 'Contact',
+            'type' => $type,
         ]);
 
         return (int) (is_array($res) ? ($res['contactid'] ?? 0) : $res);
     }
 
     public function register(RegisterRequest $r): OperationResult
+    {
+        return $this->operation($this->call('POST', 'domains/register.json', $this->orderParams($r, true)));
+    }
+
+    public function transfer(RegisterRequest $r, string $authCode): OperationResult
+    {
+        // domains/transfer.json: same customer/contact parameters as register; auth-code is mandatory for most TLDs.
+        $params = $this->orderParams($r, false);
+        if ($authCode !== '') {
+            $params['auth-code'] = $authCode;
+        }
+
+        return $this->operation($this->call('POST', 'domains/transfer.json', $params));
+    }
+
+    /** Parameters shared by register and transfer. Transfers have no years (the registry adds one year). */
+    private function orderParams(RegisterRequest $r, bool $withYears): array
     {
         $params = [
             'domain-name' => $r->domain,
@@ -128,8 +145,14 @@ class LegacyHttpClient implements RegistrarClient
             $params["attr-value$i"] = $value;
             $i++;
         }
+        if (!$withYears) {
+            unset($params['years']);
+            if (!$r->nameservers) {
+                unset($params['ns']); // optional on transfer: the losing registrar's nameservers are kept
+            }
+        }
 
-        return $this->operation($this->call('POST', 'domains/register.json', $params));
+        return $params;
     }
 
     /** TLDs for which the register article requires -1 instead of a contact ID, per contact role. */
@@ -223,6 +246,41 @@ class LegacyHttpClient implements RegistrarClient
         return new ActionStatus($eaqId, (string) ($row['actionstatus'] ?? 'unknown'), (string) ($row['actionstatusdesc'] ?? ''));
     }
 
+    public function authCode(int $orderId): string
+    {
+        // UNCONFIRMED against a live order: the code is the "domsecret" field of domains/details.json (as WHMCS's module reads it).
+        $res = $this->call('GET', 'domains/details.json', ['order-id' => $orderId, 'options' => 'All']);
+        $code = is_array($res) ? trim((string) ($res['domsecret'] ?? '')) : '';
+        if ($code === '') {
+            throw new RegistrarException('The registrar did not return a transfer code for this domain.', RegistrarException::API);
+        }
+
+        return $code;
+    }
+
+    public function transferLock(int $orderId): ?bool
+    {
+        // UNCONFIRMED: the lock shows up as "transferlock" in the order status list of domains/details.json.
+        $res = $this->call('GET', 'domains/details.json', ['order-id' => $orderId, 'options' => 'All']);
+        foreach (['orderstatus', 'domainstatus'] as $key) {
+            if (is_array($res) && isset($res[$key]) && is_array($res[$key])) {
+                return in_array('transferlock', array_map(fn ($v) => strtolower((string) $v), $res[$key]), true);
+            }
+        }
+
+        return null;
+    }
+
+    public function setTransferLock(int $orderId, bool $locked): void
+    {
+        $this->call('POST', $locked ? 'domains/enable-theft-protection.json' : 'domains/disable-theft-protection.json', ['order-id' => $orderId]);
+    }
+
+    public function deleteOrder(int $orderId): OperationResult
+    {
+        return $this->operation($this->call('POST', 'domains/delete.json', ['order-id' => $orderId]), $orderId);
+    }
+
     public function searchOrders(int $page, int $perPage = 100): OrderPage
     {
         // UNCONFIRMED: response keys ("orders.orderid", "entity.description", "orders.endtime") are from the API article, not a recorded response.
@@ -273,6 +331,19 @@ class LegacyHttpClient implements RegistrarClient
         $body = trim($resp['body']);
         $json = json_decode($body, true);
 
+        // Cloudflare in front of httpapi.com can refuse the request before ResellerClub sees it (HTML block page).
+        // That is not the IP whitelist, so say so: the fix is different (contact ResellerClub with the Ray ID).
+        if ($json === null && ($resp['status'] === 403 || $resp['status'] === 503) && (stripos($body, 'cloudflare') !== false || stripos($body, '<html') !== false)) {
+            $ray = preg_match('/Ray ID:?\s*(?:<[^>]+>\s*)*([0-9a-f]{16})/i', $body, $m) ? $m[1] : null;
+            $ip = preg_match('/id="cf-footer-ip">([^<]+)</i', $body, $m2) ? trim($m2[1]) : null;
+            throw new RegistrarException(
+                'Blocked by ResellerClub\'s Cloudflare firewall (HTTP ' . $resp['status'] . ') before the API was reached'
+                . ($ip ? "; this server's outgoing IP is $ip" : '') . ($ray ? "; Cloudflare Ray ID $ray" : '')
+                . '. Ask ResellerClub support to allow this IP; the API whitelist alone does not help.',
+                RegistrarException::UNREACHABLE,
+            );
+        }
+
         // A non-whitelisted IP is documented as: "Access Denied. You are not allowed to perform this action."
         if ($resp['status'] === 403 || stripos($body, 'not allowed to perform') !== false || stripos($body, 'access denied') !== false) {
             throw new RegistrarException('Request rejected: the server IP is probably not whitelisted at Settings > API in ResellerClub.', RegistrarException::IP_NOT_WHITELISTED);
@@ -285,7 +356,9 @@ class LegacyHttpClient implements RegistrarClient
         // Both {"status":"ERROR","message":..} and {"status":"error","error":..} occur (the latter on register.json).
         if (is_array($json) && is_string($json['status'] ?? null) && strcasecmp($json['status'], 'error') === 0) {
             $msg = (string) ($json['message'] ?? $json['error'] ?? 'Unknown error');
-            throw new RegistrarException($this->redact($msg), $this->classify($msg));
+            // Name the call that failed (and the non-secret ids it was sent): "Invalid domainName For Given ContactType"
+            // alone cannot say whether the contact creation or the registration produced it.
+            throw new RegistrarException('[' . $path . $this->describe($params) . '] ' . $this->redact($msg), $this->classify($msg));
         }
 
         return $json;
@@ -302,6 +375,20 @@ class LegacyHttpClient implements RegistrarClient
             str_contains($m, 'not available'), str_contains($m, 'already registered'), str_contains($m, 'already exists') => RegistrarException::TAKEN,
             default => RegistrarException::API,
         };
+    }
+
+    /** Only identifiers and settings that help to understand a failed call; never credentials, names, addresses or codes. */
+    private function describe(array $params): string
+    {
+        $safe = ['domain-name', 'years', 'customer-id', 'reg-contact-id', 'admin-contact-id', 'tech-contact-id', 'billing-contact-id', 'type', 'order-id', 'invoice-option'];
+        $parts = [];
+        foreach ($safe as $k) {
+            if (array_key_exists($k, $params)) {
+                $parts[] = $k . '=' . (is_array($params[$k]) ? implode(',', $params[$k]) : $params[$k]);
+            }
+        }
+
+        return $parts ? ' ' . implode(' ', $parts) : '';
     }
 
     private function redact(string $s): string
@@ -323,8 +410,9 @@ class LegacyHttpClient implements RegistrarClient
         $ch = curl_init($method === 'GET' ? $url . '?' . $query : $url);
         curl_setopt_array($ch, [
             CURLOPT_RETURNTRANSFER => true,
-            CURLOPT_TIMEOUT => 30,
-            CURLOPT_CONNECTTIMEOUT => 10,
+            // Availability lookups run while a customer waits at checkout: give up fast and let the page say "try again".
+            CURLOPT_TIMEOUT => str_contains($url, '//domaincheck.') ? 10 : 30,
+            CURLOPT_CONNECTTIMEOUT => str_contains($url, '//domaincheck.') ? 5 : 10,
         ]);
         if ($method === 'POST') {
             curl_setopt($ch, CURLOPT_POST, true);

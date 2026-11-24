@@ -5,7 +5,7 @@ namespace Paymenter\Extensions\Servers\ResellerClub\Core;
 /** Admin retry: puts a failed register or renew operation back to queued so its job can run again. */
 class OperationRetry
 {
-    public const RETRYABLE = ['register', 'renew'];
+    public const RETRYABLE = ['register', 'transfer', 'renew'];
 
     public function __construct(private readonly OperationStore $store) {}
 

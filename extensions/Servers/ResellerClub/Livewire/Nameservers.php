@@ -20,10 +20,19 @@ class Nameservers extends Component
 
     public ?string $message = null;
 
-    public function mount(int $serviceId, array $current = []): void
+    /** The nameservers every new domain starts with (from the server settings). */
+    public array $defaults = [];
+
+    public function mount(int $serviceId, array $current = [], array $defaults = []): void
     {
         $this->serviceId = $serviceId;
         $this->nameservers = implode("\n", $current);
+        $this->defaults = $defaults;
+    }
+
+    public function useDefaults(): void
+    {
+        $this->nameservers = implode("\n", $this->defaults);
     }
 
     private function service(): Service

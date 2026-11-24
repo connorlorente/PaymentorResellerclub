@@ -60,7 +60,7 @@ class OperationResource extends Resource
             ])
             ->filters([
                 SelectFilter::make('status')->options(array_combine(['queued', 'submitted', 'completed', 'failed'], ['Queued', 'Submitted', 'Completed', 'Failed'])),
-                SelectFilter::make('type')->options(['register' => 'Register', 'renew' => 'Renew', 'nameservers' => 'Nameservers']),
+                SelectFilter::make('type')->options(['register' => 'Register', 'transfer' => 'Transfer', 'renew' => 'Renew', 'nameservers' => 'Nameservers', 'cancel' => 'Cancel']),
             ])
             ->recordActions([
                 Action::make('retry')
@@ -71,7 +71,7 @@ class OperationResource extends Resource
                     ->action(function (Operation $record) {
                         $type = (new OperationRetry(new EloquentOperationStore()))->reset($record->idempotency_key);
                         match ($type) {
-                            'register' => RegisterDomainJob::dispatch($record->service_id, $record->idempotency_key),
+                            'register', 'transfer' => RegisterDomainJob::dispatch($record->service_id, $record->idempotency_key),
                             'renew' => RenewDomainJob::dispatch($record->service_id, $record->idempotency_key),
                         };
                         Notification::make()->title('Retry queued')->success()->send();

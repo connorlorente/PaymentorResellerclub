@@ -61,6 +61,7 @@ class TldProducts
             'description' => "Register a .$tld domain name.",
             'allow_quantity' => 'disabled', // one name per line item
             'server_id' => $server->id,
+            'hidden' => true, // starts hidden: review the prices, then untick "Hide product" to put it on sale
         ]);
         $product->settings()->createMany([
             ['key' => 'tld', 'value' => $tld, 'type' => 'string'],

@@ -1,0 +1,4 @@
+.env.rc-test
+dist/
+*.sw?
+.phpunit.result.cache

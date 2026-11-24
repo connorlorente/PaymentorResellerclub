@@ -32,6 +32,86 @@ class ClientTest extends TestCase
         $this->assertSame(42, $r->actionId);
     }
 
+    public function test_cloudflare_block_page_is_not_reported_as_whitelist_problem(): void
+    {
+        $html = '<html><title>Attention Required! | Cloudflare</title><span>Cloudflare Ray ID: <strong class="font-semibold">a5f398d04d8abf0d</strong></span>'
+            . '<span class="hidden" id="cf-footer-ip">203.0.113.9</span></html>';
+        $c = $this->client(['status' => 403, 'body' => $html]);
+        try {
+            $c->ping();
+            $this->fail('expected exception');
+        } catch (RegistrarException $e) {
+            $this->assertSame(RegistrarException::UNREACHABLE, $e->kind);
+            $this->assertStringContainsString('Cloudflare', $e->getMessage());
+            $this->assertStringContainsString('203.0.113.9', $e->getMessage());
+            $this->assertStringContainsString('a5f398d04d8abf0d', $e->getMessage());
+        }
+    }
+
+    public function test_plain_403_is_still_the_whitelist_problem(): void
+    {
+        $c = $this->client(['status' => 403, 'body' => 'Access Denied. You are not allowed to perform this action.']);
+        try {
+            $c->ping();
+            $this->fail('expected exception');
+        } catch (RegistrarException $e) {
+            $this->assertSame(RegistrarException::IP_NOT_WHITELISTED, $e->kind);
+        }
+    }
+
+    public function test_transfer_sends_auth_code_and_contacts_but_no_years(): void
+    {
+        $c = $this->client(['status' => 200, 'body' => '{"entityid":77,"eaqid":88,"actionstatus":"InvoicePaid"}'], $seen);
+        $r = $c->transfer(new RegisterRequest('mine.co.uk', 1, [], 11, 22), 'EPP-SECRET');
+        $this->assertSame('https://test.httpapi.com/api/domains/transfer.json', $seen['url']);
+        $this->assertSame('EPP-SECRET', $seen['params']['auth-code']);
+        $this->assertArrayNotHasKey('years', $seen['params']);
+        $this->assertArrayNotHasKey('ns', $seen['params']); // keep the current nameservers when none were given
+        $this->assertSame(22, $seen['params']['reg-contact-id']);
+        $this->assertSame(-1, $seen['params']['admin-contact-id']); // .uk needs -1
+        $this->assertSame(77, $r->orderId);
+    }
+
+    public function test_api_errors_name_the_failing_call_and_its_non_secret_ids_only(): void
+    {
+        $c = $this->client(['status' => 200, 'body' => '{"status":"error","error":"Invalid domainName For Given ContactType"}']);
+        try {
+            $c->register(new RegisterRequest('shop.co.uk', 1, ['ns1.a.com', 'ns2.a.com'], 11, 22));
+            $this->fail('expected exception');
+        } catch (RegistrarException $e) {
+            $msg = $e->getMessage();
+            $this->assertStringContainsString('domains/register.json', $msg);
+            $this->assertStringContainsString('domain-name=shop.co.uk', $msg);
+            $this->assertStringContainsString('reg-contact-id=22', $msg);
+            $this->assertStringContainsString('admin-contact-id=-1', $msg); // .uk sends -1 for the other roles
+            $this->assertStringContainsString('Invalid domainName For Given ContactType', $msg);
+            $this->assertStringNotContainsString('SECRETKEY', $msg);
+            $this->assertStringNotContainsString('auth-userid', $msg);
+        }
+    }
+
+    public function test_contact_is_created_with_the_requested_type(): void
+    {
+        $person = ['name' => 'A B', 'email' => 'a@b.c', 'address' => '1 St', 'city' => 'X', 'country' => 'GB', 'zip' => 'AB1 2CD', 'phone_cc' => '44', 'phone' => '7700900123'];
+
+        $c = $this->client(['status' => 200, 'body' => '12345'], $seen);
+        $this->assertSame(12345, $c->createContact($person, 9));
+        $this->assertSame('Contact', $seen['params']['type']); // unchanged default
+
+        $c->createContact($person, 9, 'UkContact');
+        $this->assertSame('contacts/add.json', substr($seen['url'], -17));
+        $this->assertSame('UkContact', $seen['params']['type']);
+    }
+
+    public function test_register_still_sends_years_and_nameservers(): void
+    {
+        $c = $this->client(['status' => 200, 'body' => '{"entityid":1,"eaqid":2}'], $seen);
+        $c->register(new RegisterRequest('new.com', 2, ['ns1.a.com', 'ns2.a.com'], 11, 22));
+        $this->assertSame('https://test.httpapi.com/api/domains/register.json', $seen['url']);
+        $this->assertSame(2, $seen['params']['years']);
+        $this->assertSame(['ns1.a.com', 'ns2.a.com'], $seen['params']['ns']);
+    }
+
     public function test_availability_uses_separate_host_and_flags_premium(): void
     {
         $c = $this->client(['status' => 200, 'body' => '{"a.com":{"status":"available"},"b.io":{"status":"available","costHash":"x"}}'], $seen);

@@ -14,7 +14,14 @@ class EloquentOperationStore implements OperationStore
             ['service_id' => $serviceId, 'type' => $type, 'status' => 'queued', 'payload' => Redactor::payload($payload)],
         ); // unique index makes concurrent creation collapse into one row
 
-        return [$op->toArray(), $op->wasRecentlyCreated];
+        $created = $op->wasRecentlyCreated;
+        if ($created) {
+            // A just-created model only knows the attributes it was given: reload it so the columns that have
+            // database defaults (attempts, rc_order_id, ...) are present, exactly as when the row is read later.
+            $op->refresh();
+        }
+
+        return [$op->toArray(), $created];
     }
 
     public function update(string $key, array $changes): void

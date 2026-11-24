@@ -14,7 +14,21 @@ use Paymenter\Extensions\Servers\ResellerClub\ResellerClub;
 /** Paymenter has no renewal hook, so a forward change of expires_at is the renewal signal. */
 class RenewOnServiceUpdated
 {
+    /**
+     * This fires for EVERY service update, including inside Paymenter's nightly cron job, which runs in one
+     * database transaction: an exception here would roll back the whole night's invoices and suspensions.
+     * So nothing may escape this method.
+     */
     public function handle(Updated $event): void
+    {
+        try {
+            $this->renewIfNeeded($event);
+        } catch (\Throwable $e) {
+            \Paymenter\Extensions\Servers\ResellerClub\Core\SafeReport::report($e);
+        }
+    }
+
+    private function renewIfNeeded(Updated $event): void
     {
         $service = $event->service;
 

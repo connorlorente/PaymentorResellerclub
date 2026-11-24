@@ -21,6 +21,11 @@
                                 <span>{{ $row['price'] }}</span>
                                 <a href="{{ $row['url'] }}" wire:navigate><x-button.primary>{{ __('Buy') }}</x-button.primary></a>
                             </span>
+                        @elseif ($row['status'] === 'taken' && $row['url'])
+                            <span class="flex items-center gap-4">
+                                <span class="text-base/70">{{ __('Registered — already yours?') }}</span>
+                                <a href="{{ $row['url'] }}" wire:navigate><x-button.secondary>{{ __('Transfer') }}</x-button.secondary></a>
+                            </span>
                         @elseif ($row['status'] === 'taken')
                             <span class="text-base/70">{{ __('Taken') }}</span>
                         @else
